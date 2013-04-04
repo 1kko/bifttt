@@ -1,0 +1,611 @@
+#!/bin/bash
+# Bifttt - Ikko(me@1kko.com) / Apr. 1. 2013. 
+# bash version of ifttt.com
+
+# requires preinstalled sqlite3
+#
+# wget, awk, grep should be exist in user's $PATH
+
+# Disclaimer
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+#############################################
+##                                         ##
+##               Misc/Config               ##
+##                                         ##
+#############################################
+
+## To enable debug mode, uncomment this
+#set -x
+
+#Database File path
+gDBFile=$(pwd)/bifttt.db
+
+#sqlite binary path
+gSqLite=/usr/bin/sqlite3
+
+# if file not found, use default path.
+[[ ! -f $gSqLite ]] && gSqLite=sqlite3
+
+
+function MenuBar()
+{
+	local __varReturnValue=$1
+	local __varUserSelection
+	echo ""
+	echo "Menu: (a)dd, (m)od, (d)el, (q)uit"
+	read -n1 -p "Select: " __varUserSelection
+	echo ""
+	case $__varUserSelection in
+		a|A|m|M|d|D|q|Q)
+			eval $__varReturnValue="'$__varUserSelection'" ;;
+	esac
+}
+
+function DBQuery()
+{
+	$gSqLite -list -separator "\`" $gDBFile "$@;"
+	return $?
+}
+
+function DBInit()
+{
+	local varQuery
+	[[ -f $gDBFile ]] && (echo "Cannot initialize Database, file exists!"; exit 1)
+	echo -n "Creating Table Structure..."
+	echo "" > $gDBFile
+	varQuery=" PRAGMA foreign_keys=ON;"
+	varQuery+="CREATE TABLE tbSource (Id INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT, Type TEXT, Content TEXT);"
+	varQuery+="CREATE TABLE tbFilter (Id INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT, Type TEXT, Content TEXT);"
+	varQuery+="CREATE TABLE tbAction (Id INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT, Type TEXT, Content TEXT);"
+	varQuery+="CREATE TABLE tbAgent  (Id INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT, Enable TEXT,"
+	varQuery+="   SourceId INTEGER REFERENCES tbSource(Id) ON DELETE RESTRICT,"
+	varQuery+="   FilterId INTEGER REFERENCES tbFilter(Id) ON DELETE RESTRICT,"
+	varQuery+="   ActionId INTEGER REFERENCES tbAction(Id) ON DELETE RESTRICT,"
+	varQuery+="   Description TEXT);"
+
+	DBQuery "$varQuery"
+	echo "Done"
+}
+
+function IsNum()
+{
+	local varTest
+	typeset varTest="$(echo "$1" | sed 's/[0-9]*//g' )"
+
+	[[ -z "$1" ]] && (echo 0; return 1)
+	[ "${varTest}"x = ""x ] && (echo $1; return 0) || (echo 0; return 1)
+}
+
+#############################################
+##                                         ##
+##                 Common                  ##
+##                                         ##
+#############################################
+
+## Global Variable
+gSourceSelectionItems=("Web" "Script" "Executable")
+gFilterSelectionItems=("Contains" "RegExMatch" "CompareValue")
+gActionSelectionItems=("Web" "Script" "Executable")
+
+function Add()
+{
+	local varModuleName=$1
+	local varSelectionItems
+	local varName varType varContent
+	local varUserSelection
+
+	case $varModuleName in
+		Filter)	varSelectionItems=(${gFilterSelectionItems[@]}) ;;
+		Source)	varSelectionItems=(${gSourceSelectionItems[@]}) ;;
+		Action)	varSelectionItems=(${gActionSelectionItems[@]}) ;;
+		*)		echo "invalid use of function ${FUNCNAME[0]} $varModuleName"; exit 1	;;
+	esac
+
+	echo "Adding $varModuleName"
+	while [[ -z $varType ]];
+	do
+		if [[ ${#varSelectionItems[*]} -eq 1 ]]; then
+			varType=${varSelectionItems[0]}
+		else
+			for ((i=1;i<=${#varSelectionItems[*]};i++)); do echo -n "$i.${varSelectionItems[$i-1]}  "; done
+			echo ""
+			read -n1 -p "Select $varModuleName Type: " varUserSelection
+			echo ""
+			[[ `IsNum $varUserSelection` -ge 1 ]] && varType=${varSelectionItems[$varUserSelection-1]}
+		fi
+	done
+	read -p "Enter $varModuleName Content: " varContent
+	echo ""
+	read -p "Enter $varModuleName Name: " varName
+	echo ""
+	DBQuery "INSERT INTO tb$varModuleName (Name,Type,Content) VALUES ('$varName','$varType','$varContent')"
+}
+
+function Mod()
+{
+	local varModuleName=$1
+	local varSelectionItems
+	local varUserSelection
+	local varQueryResult
+	local varOldName varOldType varOldContent
+	local varName varType varContent
+
+	echo "Modifying $varModuleName"
+	Show $varModuleName
+	read -p "Select $varModuleName ID to modify: " varUserSelection
+
+	case $varModuleName in
+		Filter)	varSelectionItems=(${gFilterSelectionItems[@]}) ;;
+		Source)	varSelectionItems=(${gSourceSelectionItems[@]}) ;;
+		Action)	varSelectionItems=(${gActionSelectionItems[@]}) ;;
+		*)
+			echo "invalid use of function ${FUNCNAME[0]} $varModuleName"
+			exit 1
+			;;
+	esac
+
+	varQueryResult=(`DBQuery "select Name,Type,Content from tb$varModuleName where Id=$varUserSelection"`)
+	varOldName=`   echo $varQueryResult | awk '{split($0,row,"\`"); print row[1]}'`
+	varOldType=`   echo $varQueryResult | awk '{split($0,row,"\`"); print row[2]}'`
+	varOldContent=`echo $varQueryResult | awk '{split($0,row,"\`"); print row[3]}'`
+
+	if [[ ${#varSelectionItems[*]} -eq 1 ]]; then
+		varType=${varSelectionItems[0]}
+	else
+		for ((i=1;i<=${#varSelectionItems[*]};i++)); do echo -n "$i.${varSelectionItems[$i-1]}  "; done
+		echo ""
+		echo "Old Type: $varOldType"
+		read -n1 -p "Select $varModuleName Type: " varUserSelection
+		echo ""
+		[[ -z $varOldType ]] && varType=$varOldType
+		[[ `IsNum $varUserSelection` -ge 1 ]] && varType=${varSelectionItems[$varUserSelection-1]}
+	fi
+
+	echo "Old Content: $varOldContent"
+	read -p "Enter $varModuleName Content: " varContent
+	[[ -z $varContent ]] && varContent=$varOldContent
+	echo ""
+
+	echo "Old Name: $varOldName"
+	read -p "Enter New $varModuleName Name: " varName
+	[[ -z $varName ]] && varName=$varOldName
+	echo ""
+
+	DBQuery "UPDATE tb$varModuleName SET Name='$varName', Type='$varType', Content='$varContent' WHERE Id='$varUserSelection'"
+}
+
+function Del()
+{
+	local varModuleName=$1
+	local varUserSelection
+	echo "Deleting $varModuleName"
+
+	Show $varModuleName
+	read -p "Select $varModuleName ID to Delete: " varUserSelection
+	DBQuery "PRAGMA foreign_keys=ON;DELETE FROM tb$varModuleName WHERE Id='$varUserSelection'"
+}
+
+function Show()
+{
+	local varModuleName=$1
+	local varList
+	local varId varName varType varContent
+
+	local LineHr="+------+------------------+--------------+---------"
+
+	for ((i=0;i<${#LineHr};i++)); do echo -n "="; done; echo ""
+	printf "| %-4s | %-16s | %-12s | %s\n" "Id" "Name" "Type" "Content"
+	echo $LineHr
+
+	DBQuery "SELECT Id, Name, Type, Content FROM tb$varModuleName ORDER BY Id ASC" | \
+	while read varList
+	do
+		varId=`  echo $varList | awk '{split($0,row,"\`"); print row[1]}'`
+		varName=`echo $varList | awk '{split($0,row,"\`"); print row[2]}'`
+		varType=`echo $varList | awk '{split($0,row,"\`"); print row[3]}'`
+		varContent=`echo $varList | awk '{split($0,row,"\`"); print row[4]}'`
+		printf "| %4s | %16s | %12s | %s\n" "$varId" "$varName" "$varType" "$varContent"
+	done
+	echo $LineHr
+}
+
+function Manage()
+{
+	local varModuleName=$1
+	local varUserSelection
+	while((1));
+	do	
+		varUserSelection=""
+		Show $varModuleName
+		MenuBar varUserSelection
+		case $varUserSelection in
+			a|A)	Add $varModuleName ;;
+			m|M)	Mod $varModuleName ;;
+			d|D)	Del $varModuleName ;;
+			q|Q)	return 0 ;;
+		esac
+	done
+}
+
+
+#############################################
+##                                         ##
+##                 Agent                   ##
+##                                         ##
+#############################################
+
+function ManageAgent()
+{
+	local varModuleName=$1
+	local varUserSelection
+	while((1));
+	do	
+		varUserSelection=""
+		ShowAgent
+		MenuBar varUserSelection
+		case $varUserSelection in
+			a|A)	AddAgent ;;
+			m|M)	ModAgent ;;
+			d|D)	DelAgent ;;
+			q|Q)	return 0 ;;
+		esac
+	done
+}
+
+function AddAgent()
+{
+	local varName varSourceId varFilterId varActionId varDescription varEnable
+	echo "Adding Agent"
+
+	Show Source
+	read -p "Select Source: " varSourceId
+	Show Filter
+	read -p "Select Filter: " varFilterId
+	Show Action
+	read -p "Select Action: " varActionId
+	echo ""
+	read -p "Enter Agent Name: " varName
+	read -p "Description: " varDescription
+	read -n1 -p "Enable(Y/n): " varEnable ; [[ -z "$varEnable" ]] && varEnable="Y"
+	echo ""
+
+	DBQuery "INSERT INTO tbAgent (Name,Enable,SourceId,FilterId,ActionId,Description) VALUES ('$varName','$varEnable','$varSourceId','$varFilterId','$varActionId','$varDescription')"
+}
+
+function ModAgent()
+{
+	local varUserSelection
+	local varQueryResult
+	local varOldName varOldEnable varOldSourceId varOldFilterId varOldActionId varDescription
+	local varName varSourceId varFilterId varActionId varDescription varEnable
+	echo "Modifying Agent"
+
+	ShowAgent
+	read -p "Select Agent ID to Modify: " varUserSelection
+
+	varQueryResult=(`DBQuery "SELECT Name,Enable,SourceId,FilterId,ActionId,Description from tbAgent where Id='$varUserSelection'"`)
+	varOldName=`    echo $varQueryResult | awk '{split($0,row,"\`"); print row[1]}'`
+	varOldEnable=`  echo $varQueryResult | awk '{split($0,row,"\`"); print row[2]}'`
+	varOldSourceId=`echo $varQueryResult | awk '{split($0,row,"\`"); print row[3]}'`
+	varOldFilterId=`echo $varQueryResult | awk '{split($0,row,"\`"); print row[4]}'`
+	varOldActionId=`echo $varQueryResult | awk '{split($0,row,"\`"); print row[5]}'`
+	varOldDescription=`echo $varQueryResult | awk '{split($0,row,"\`"); print row[6]}'`
+
+	read -n1 -p "Enable(y/n): " varEnable ; [[ -z $varEnable ]] && varEnable="$varOldEnable"
+	echo ""
+
+	Show Source
+	echo "Old Source Id: $varOldSourceId"
+	read -p "Select Source: " varSourceId ; [[ -z $varSourceId ]] && varSourceId="$varOldSourceId"
+	echo ""
+
+	Show Filter
+	echo "Old Filter Id: $varOldFilterId"
+	read -p "Select Filter: " varFilterId ; [[ -z $varFilterId ]] && varFilterId="$varOldFilterId"
+	echo ""
+
+	Show Action
+	echo "Old Action Id: $varOldActionId"
+	read -p "Select Action: " varActionId ; [[ -z $varActionId ]] && varActionId="$varOldActionId"
+	echo ""
+
+	echo "Old Agent Name: $varOldName"
+	read -p "Enter Agent Name: " varName  ; [[ -z $varName ]] && varName="$varOldName"
+	echo ""
+
+	echo "Old Description: $varOldDescription"
+	read -p "Description: " varDescription ; [[ -z $varDescription ]] && varDescription="$varOldDescription"
+	echo ""
+
+	DBQuery "UPDATE tbAgent SET Name='$varName', Enable='$varEnable', SourceId='$varSourceId', FilterId='$varFilterId', ActionId='$varActionId', Description='$varDescription' WHERE Id='$varUserSelection'"
+}
+
+function DelAgent()
+{
+	local varUserSelection
+	echo "Deleting Agent"
+
+	ShowAgent
+	read -p "Select Agent ID to Delete: " varUserSelection
+	DBQuery "DELETE FROM tbAgent WHERE Id='$varUserSelection'"
+}
+
+function ShowAgent()
+{
+	local varModuleName=$1
+	local varId varName varSourceId varFilterId varActionId varDescription varEnable
+	local varList
+	local varSourceContent varFilterType varFilterContent varActionContent
+
+	local LineHr="+------+---+------------------+----------------+----------------+----------------+-------------"
+
+	for ((i=0;i<${#LineHr};i++)); do echo -n "="; done; echo ""
+	printf "| %-4s | %1s | %-16s | %-14s | %-14s | %-14s | %s\n" "Id" "E" "Name" "Source" "Filter" "Action" "Description"
+	echo $LineHr
+
+	DBQuery "SELECT Id,Enable,Name,SourceId,FilterId,ActionId,Description FROM tbAgent ORDER BY Id ASC" | \
+	while read varList
+	do
+		varEnable=`  echo $varList | awk '{split($0,row,"\`"); print row[1]}'`
+		varId=`      echo $varList | awk '{split($0,row,"\`"); print row[2]}'`
+		varName=`    echo $varList | awk '{split($0,row,"\`"); print row[3]}'`
+		varSourceId=`echo $varList | awk '{split($0,row,"\`"); print row[4]}'`
+		varFilterId=`echo $varList | awk '{split($0,row,"\`"); print row[5]}'`
+		varActionId=`echo $varList | awk '{split($0,row,"\`"); print row[6]}'`
+		varDescription=`echo $varList | awk '{split($0,row,"\`"); print row[7]}'`
+
+		[[ $varSourceId == "\\." ]] || varSourceContent="`DBQuery "SELECT Content FROM tbSource WHERE Id='$varSourceId'"`"
+		[[ $varFilterId == "\\." ]] || varFilterType="`   DBQuery "SELECT Type FROM tbFilter WHERE Id='$varFilterId'"`" 
+		[[ $varFilterId == "\\." ]] || varFilterContent="`DBQuery "SELECT Content FROM tbFilter WHERE Id='$varFilterId'"`"
+		[[ $varActionId == "\\." ]] || varActionContent="`DBQuery "SELECT Content FROM tbAction WHERE Id='$varActionId'"`"
+
+		printf "| %-4s | %1s | %-16s | %-14s | %-14s | %-14s | %s\n" "$varEnable" "$varId" "$varName" "$varSourceId.$varSourceContent" "$varFilterType $varFilterContent" "$varActionId.$varActionContent" "$varDescription"
+	done
+	echo $LineHr
+}
+
+
+#############################################
+##                                         ##
+##                  Run                    ##
+##                                         ##
+#############################################
+
+function RunSource()
+{
+	local varModuleName="Source"
+	local varId=$1
+	local varSelectionItems
+	local varType varContent
+	local varOutput
+
+	varType="`DBQuery "SELECT Type FROM tb$varModuleName WHERE Id='$varId'"`"
+	varContent="`DBQuery "SELECT Content FROM tb$varModuleName WHERE Id='$varId'"`"
+
+	case $varModuleName in
+		Source)		varSelectionItems=(${gSourceSelectionItems[*]}) ;;
+		Filter)		varSelectionItems=(${gFilterSelectionItems[*]}) ;;
+		Action)		varSelectionItems=(${gActionSelectionItems[*]}) ;;
+	esac
+
+	case $varType in
+		# "Web"
+		${varSelectionItems[0]})
+			varOutput="`wget -q -O - $varContent`"
+			;;
+		# "Script"
+		${varSelectionItems[1]})
+			varOutput="`/bin/sh $varContent`"
+			;;
+		# "Executable"
+		${varSelectionItems[2]})
+			varOutput="`$varContent`"
+			;;
+		*)
+			varOutput=""
+			;;
+	esac
+	echo $varOutput
+	[[ -n "$varOutput" ]] && return 0 || return 1
+}
+
+function RunFilter()
+{
+	local varModuleName="Filter"
+	local varId=$1
+	shift
+	local varInput="${@}"
+	local varSelectionItems
+	local varType varContent
+	local varOutput
+
+	varType=`DBQuery "SELECT Type FROM tb$varModuleName WHERE Id='$varId'"`
+	varContent=`DBQuery "SELECT Content FROM tb$varModuleName WHERE Id='$varId'"`
+
+	case $varModuleName in
+		Source)		varSelectionItems=(${gSourceSelectionItems[*]}) ;;
+		Filter)		varSelectionItems=(${gFilterSelectionItems[*]}) ;;
+		Action)		varSelectionItems=(${gActionSelectionItems[*]}) ;;
+	esac
+
+	case $varType in
+		# "Contains"
+		${varSelectionItems[0]})
+			[[ `echo $varInput | grep -i $varContent` ]] && varOutput=1
+			;;
+		# "RegExMatch"
+		${varSelectionItems[1]})
+			[[ `echo $varInput | grep -e $varContent` ]] && varOutput=1
+			;;
+		# "CompareValue"
+		${varSelectionItems[2]})
+			(( $varInput $varContent )) && varOutput=1
+			;;
+		*)
+			varOutput=""
+			;;
+	esac
+	echo $varOutput
+	[[ $varOutput -eq 1 ]] && return 0 || return 1
+}
+
+function RunAction()
+{
+	local varModuleName="Action"
+	local varId=$1
+	local varSelectionItems
+	local varType varContent
+	local varOutput
+
+	varType="`DBQuery "SELECT Type FROM tb$varModuleName WHERE Id='$varId'"`"
+	varContent="`DBQuery "SELECT Content FROM tb$varModuleName WHERE Id='$varId'"`"
+
+	case $varModuleName in
+		Source)		varSelectionItems=(${gSourceSelectionItems[*]}) ;;
+		Filter)		varSelectionItems=(${gFilterSelectionItems[*]}) ;;
+		Action)		varSelectionItems=(${gActionSelectionItems[*]}) ;;
+	esac
+
+	case $varType in
+		# "Web"
+		${varSelectionItems[0]})
+			varOutput="`wget -q -O - $varContent`"
+			;;
+		# "Script"
+		${varSelectionItems[1]})
+			varOutput="`/bin/sh $varContent`"
+			;;
+		# "Executable"
+		${varSelectionItems[2]})
+			varOutput=`$varContent`
+			;;
+		*)
+			varOutput=""
+			;;
+	esac
+	echo "$varOutput"
+	[[ -n "$varOutput" ]] && return 0 || return 1
+}
+
+function RunAgentChild()
+{
+	#select enabled agents, and run Source get output, use filter to filter output, if filtered output is true, run Action.
+
+	local varId=$1
+	local varSourceId varFilterId varActionId
+	local varSourceOutput varFilterOutput varActionOutput
+
+	varSourceId=`DBQuery "SELECT SourceId FROM tbAgent WHERE Id='$varId'"`
+	varSourceOutput=`RunSource $varSourceId`
+	[[ "$varSourceOutput" ]] || return 1
+
+	varFilterId=`DBQuery "SELECT FilterId FROM tbAgent WHERE Id='$varId'"`
+	[[ `RunFilter $varFilterId $varSourceOutput` ]] || return 1
+
+	varActionId=`DBQuery "SELECT ActionId FROM tbAgent WHERE Id='$varId'"`
+	RunAction $varActionId &
+}
+
+function RunAgent()
+{
+	local varId
+
+	DBQuery "SELECT Id from tbAgent WHERE Enable='y' OR Enable='Y' ORDER BY Id ASC" | \
+	while read varId
+	do
+		RunAgentChild $varId &
+	done
+}
+
+
+#############################################
+##                                         ##
+##                MainMenu                 ##
+##                                         ##
+#############################################
+
+function MenuHeader()
+{
+	echo "Bifttt v0.1 - me@1kko.com"
+}
+
+function MainMenu()
+{
+	local varUserSelection
+	clear
+	MenuHeader
+	echo ""
+	echo "  s. manage Source"
+	echo "  f. manage Filter"
+	echo "  a. manage Action"
+	echo ""
+	echo "  g. manage Agent"
+	echo ""
+	echo "  q. Quit"
+	echo ""
+	read -n1 -p " Select: " varUserSelection
+	echo ""
+	case $varUserSelection in
+		s|S)	Manage "Source" ;;
+		f|F)	Manage "Filter" ;;
+		a|A)	Manage "Action" ;;
+		g|G)	ManageAgent ;;
+		q|Q)	exit 0 ;;
+	esac
+}
+
+function ShowHelp()
+{
+	MenuHeader
+	echo ""
+	echo " usage: $0 [Options]"
+	echo ""
+	echo "Options"
+	echo "	-r 		Run Agents"
+	echo "	-i 		Initialize Database"
+	echo "	-h 		Show Help message"
+	echo ""
+}
+
+if [[ -z $1 ]]; then
+	[[ ! -f $gDBFile ]] && DBInit
+	while ((1)); do
+		MainMenu
+	done
+fi
+while getopts "rf:ih" varOptName
+do
+	case "$varOptName" in
+		r)
+			echo "Running Agents..."
+			RunAgent
+			;;
+		f)
+			echo "Direct Function Call"
+			$OPTARG
+			;;
+		i)
+			echo "Initializing database..."
+			DBInit
+			;;
+		*)
+			ShowHelp
+			exit 0
+			;;
+			
+	esac
+done
+
